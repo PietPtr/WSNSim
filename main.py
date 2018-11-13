@@ -1,3 +1,3 @@
 import sim
 
-simulator = sim.Sim()
+simulator = sim.Simulator(1000, 100, 45)
