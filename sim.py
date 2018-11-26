@@ -1,26 +1,46 @@
-import math
+from math import log10, sqrt
 from pprint import pprint
 import random
 
+GATEWAY_HEIGHT = 30
+C = 0 # for suburb
+CARRIER_FREQ = 868
+
+
 def calculateDistance(pos1, pos2):
-    return math.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
+    return sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
 
 # Calculate the received bluetooth strength at node rx transmitted from node tx
 def bluetoothRXPower(tx, rx):
     if tx.position == rx.position:
         return 0
-    return -(40.04 + 10 * 3.71 * math.log10(calculateDistance(tx.position, rx.position)))
+    return -(40.04 + 10 * 3.71 * log10(calculateDistance(tx.position, rx.position)))
+
+def loraRXPower(tx, rx):
+    if tx.position == rx.position:
+        return 0
+
+    d = calculateDistance(tx.position, rx.position) / 1000
+    f = CARRIER_FREQ
+    hB = GATEWAY_HEIGHT
+    hR = 0
+
+    a = (1.1 * log10(f) - 0.7) * hR - (1.56 * log10(f) - 0.8)
+
+    L = 46.3 + 33.9 * log10(f) - 13.82 * log10(hB) - a + (44.9 - 6.55 * log10(hB)) * log10(d) + C
+
+    return -L
 
 class Simulator(object):
-    def __init__(self, areasize, gridsize, root_amount_nodes, queue):
+    def __init__(self, areasize, gridsize, root_amount_nodes, queue, settings):
         self.queue = queue
         self.groups = []
         self.gridsize = gridsize
         self.areasize = areasize
         self.num_nodes = int(root_amount_nodes) ** 2
-        self.center = Node((areasize // 2, areasize // 2)) #central receiver node
         self.cost = 0
         self.nodes = [] # All nodes used in the simulation
+        self.settings = settings
 
         print("Generating groups...")
         for x in range(0, areasize // gridsize):
@@ -52,14 +72,6 @@ class Simulator(object):
         for node in self.nodes:
             node.initialize(self.nodes)
 
-        # pprint(self.groups)
-
-        #For now, we simply give the first node a packet that should reach the central receiver node.
-        # self.nodes[1].addPacket()
-        # self.nodes[2].addPacket()
-        self.packetsToTransmit = 1
-        self.receivedPackets = 0
-
     def promoteToLeader(self, follower):
         leader = Leader(follower.position)
         leader.energyUsed = follower.energyUsed
@@ -76,54 +88,41 @@ class Simulator(object):
 
         self.queue.put(self.nodes)
 
-        # pprint({key: value for (key, value) in vars(self.nodes[0])})
-        print("self: " + str(self.nodes[0]))
-        pprint(vars(self.nodes[0]))
-        input()
+        if self.settings["interactive"]:
+            command = input("step")
+        else:
+            if self.settings["run_until"](self.countPackets(), self.countCollisions()):
+                return False
 
-        #This assumes the receiver node is not in the nodes array!
-        #Very important!
-        # for node in self.nodes:
-        #     if node.hasPackets():
-        #         groupleader = node.leader == node
-        #         #we have three options:
-        #         #If this node is a group leader, and is in range of the center node,
-        #         #transmit to the center node.
-        #         if groupleader and (self.calculateDistance(node.position, self.center.position) < self.maxRange):
-        #             #transmit to the center node
-        #             self.transmit(node, self.center)
-        #             self.receivedPackets += 1
-        #             break
-        #
-        #         #If this node is a group leader but not in range, transmit to the group leader that is closer.
-        #         if groupleader:
-        #             #Find group leader to transmit to
-        #             index = self.coordToIndex(node.position)
-        #             dx = node.position[0] - self.center.position[0]
-        #             dy = node.position[1] - self.center.position[1]
-        #
-        #             if dx > 100:
-        #                 newIndex = (index[0] - 1, index[1])
-        #             if dx < 100:
-        #                 newIndex = (index[0] + 1, index[1])
-        #             if dy > 100:
-        #                 newIndex = (index[0], index[1] - 1)
-        #             if dy < 100:
-        #                 newIndex = (index[0], index[1] + 1)
-        #             toNode = self.groups[newIndex[0]][newIndex[1]][0]
-        #             self.transmit(node, toNode)
-        #             break
-        #
-        #         #If this node is not a group leader, transmit to the group leader.
-        #         self.transmit(node, node.leader)
-        #
-        # if self.receivedPackets < self.packetsToTransmit:
-        #     self.simulate()
-        # else:
-        #     print('simulation ended with total cost being: ', self.cost)
+        return True
+
+    def printState(self):
+        print("Collisions:", self.countCollisions(),
+              "Packets received:", self.countPackets(),
+              "Energy used: ", self.countEnergyUsed())
 
     def coordToIndex(self, position):
         return (int(position[0] // self.gridsize), int(position[1] // self.gridsize))
+
+    def countCollisions(self):
+        total = 0
+        for node in self.nodes:
+            if type(node) == Leader:
+                total += node.collisions
+        return total
+
+    def countPackets(self):
+        total = 0
+        for node in self.nodes:
+            if type(node) == Leader:
+                total += node.receivedPackets
+        return total
+
+    def countEnergyUsed(self):
+        total = 0
+        for node in self.nodes:
+            total += node.energyUsed
+        return total
 
 
 class Node(object):
@@ -131,7 +130,9 @@ class Node(object):
         self.position = position
         self.energyUsed = 0
         self.signals = []
+        self.signalsLoRa = []
         self.transmitted = False
+        self.transmittedLoRa = False
 
     def initialize(self, allNodes):
         self.reachablesBLE = [node for node in allNodes if bluetoothRXPower(self, node) > -116]
@@ -147,7 +148,9 @@ class Node(object):
 
     def reset(self):
         self.transmitted = False
+        self.transmittedLoRa = False
         self.signals = []
+        self.signalsLoRa = []
 
     def update(self):
         pass
@@ -167,11 +170,22 @@ class Node(object):
             return False
 
     def transmitBLE(self):
-        print(self, "Transmitting BLE packet")
         self.energyUsed += 1
         for node in self.reachablesBLE:
             node.signals.append(self)
         self.transmitted = True
+
+    def transmitLoRa(self):
+        self.energyUsed += 1
+        for node in self.reachablesLoRA:
+            node.signalsLoRa.append(self)
+        self.transmittedLoRa = True
+
+# class Gateway(Node):
+#     def __init__(self, position):
+#         self.receivedPackets = 0
+#         self.collisions = 0
+#         self.loraSignals = []
 
 class Leader(Node):
     def __init__(self, position):
@@ -185,8 +199,16 @@ class Leader(Node):
     def __repr__(self):
         return self.__str__()
 
+    def initialize(self, allNodes):
+        super().initialize(allNodes)
+        self.reachablesLoRA = [node for node in allNodes if
+                type(node) == Leader and loraRXPower(self, node) > -127]
+
     def check(self):
         super().check()
+
+    def reset(self):
+        super().reset()
 
     def update(self):
         super().update()
@@ -198,8 +220,11 @@ class Leader(Node):
             else:
                 self.collisions += 1
 
-    def reset(self):
-        super().reset()
+        if self.receivedPackets > 5:
+            self.transmitLoRa()
+
+
+
 
 class Follower(Node):
     def __init__(self, position):
@@ -228,7 +253,6 @@ class Follower(Node):
         if self.packets >= 1:
             # listen to the network
             if self.listenBLE():
-                print(self, "Oh no, someone is transmitting!")
                 pass # someone is transmitting, so shut up
             else:
                 self.transmitBLE()

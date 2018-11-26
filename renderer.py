@@ -29,19 +29,30 @@ def render(queue):
 
         screen.fill(black)
 
+
         for node in data:
-            color = white
+
+            line_color = 64, 64, 64
+            dot_color = 255, 255, 255
             radius = 0
             if type(node) is Leader:
-                color = 255, 0, 0
+                dot_color = 255, 0, 0
+                line_color = dot_color
                 radius = 2
             elif type(node) is Follower:
                 if node.packets >= 1:
-                    color = 0, 255, 0
+                    dot_color = 0, 255, 0
+                    line_color = dot_color
                     radius = 2
-            pygame.draw.circle(screen, color, (int(node.position[0]), int(node.position[1])), radius)
 
             for sig in node.signals:
-                pygame.draw.line(screen, color, (node.position), (sig.position))
+                pygame.draw.line(screen, line_color, (node.position), (sig.position))
+
+            if type(node) is Leader:
+                for sig in node.signalsLoRa:
+                    pygame.draw.line(screen, line_color, (node.position), (sig.position))
+
+            pygame.draw.circle(screen, dot_color, (int(node.position[0]), int(node.position[1])), radius)
+
 
         pygame.display.flip()
