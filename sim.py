@@ -1,11 +1,24 @@
 from math import log10, sqrt
 from pprint import pprint
 import random
+import time
 
 GATEWAY_HEIGHT = 30
 C = 0 # for suburb
 CARRIER_FREQ = 868
-
+PACK_GEN_CHANCE = 0.001
+LORA_ENERGY_PER_BYTE = (32.5 / 8) / 1e6 # joule per byte (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6068831/)
+BLE_ENERGY_PER_BYTE = 0.405 * 1e-7 # based on http://www.ti.com/lit/an/swra347a/swra347a.pdf
+FIXED_BLE_PACKET_SIZE = 10
+FIXED_LORA_PACKET_SIZE = 60
+BLE_LISTEN_COST = BLE_ENERGY_PER_BYTE * 40
+# Assume that:
+#   MCU used is STM32L0: https://www.st.com/en/microcontrollers/stm32l0-series.html?querycriteria=productId=SS1817
+#   Em = (PON(fMCU) + Pm) · Tm, from the paper mentioned above
+#   PON(fMCU) = 2.82 milliwatts, based on the microcontroller spec.
+#   We could not find data on energy consumption during measuring, so we just take the controller as being not idle
+#   For the time a measure cost we also are not sure, so we took 100ms, this way it is about similar to transmitting
+LORA_LISTEN_COST = (0.00282) * 0.1
 
 def calculateDistance(pos1, pos2):
     return sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
@@ -53,10 +66,13 @@ class Simulator(object):
             for y in range(root_amount_nodes):
                 self.nodes.append(Follower((x * node_space, y * node_space)))
 
+        self.nodes.append(Gateway((areasize//2, areasize//2)))
+
         print("Generating nodes...")
         for node in self.nodes:
             indices = self.coordToIndex(node.position)
             self.groups[indices[0]][indices[1]].append(node)
+
 
         print("Assigning leaders...")
         for groupx in self.groups:
@@ -65,8 +81,6 @@ class Simulator(object):
                     if node_i == 0:
                         nodes_index = self.nodes.index(group[node_i])
                         self.nodes[nodes_index] = self.promoteToLeader(group[node_i])
-                    else:
-                        group[node_i].leader = group[0]
 
         print("Initializing nodes...")
         for node in self.nodes:
@@ -75,7 +89,7 @@ class Simulator(object):
     def promoteToLeader(self, follower):
         leader = Leader(follower.position)
         leader.energyUsed = follower.energyUsed
-        leader.signals = follower.signals
+        leader.signalsBLE = follower.signalsBLE
         return leader
 
     def simulate(self):
@@ -89,17 +103,21 @@ class Simulator(object):
         self.queue.put(self.nodes)
 
         if self.settings["interactive"]:
-            command = input("step")
+            input("step")
+            # pprint([vars(node) for node in self.nodes if type(node) == Gateway])
         else:
-            if self.settings["run_until"](self.countPackets(), self.countCollisions()):
-                return False
+            if self.settings["visualize_while_running"]:
+                time.sleep(self.settings["time_delay"])
+            if self.settings["run_until"](self):
+                input("step")
 
         return True
 
     def printState(self):
-        print("Collisions:", self.countCollisions(),
-              "Packets received:", self.countPackets(),
-              "Energy used: ", self.countEnergyUsed())
+        print(  "Collisions      :", self.countCollisions(),
+              "\nPackets received:", self.countPackets(),
+              "\nEnergy used     :", self.countEnergyUsed(),
+              "\nGateway packs   :", self.countGatewayPackets())
 
     def coordToIndex(self, position):
         return (int(position[0] // self.gridsize), int(position[1] // self.gridsize))
@@ -115,8 +133,11 @@ class Simulator(object):
         total = 0
         for node in self.nodes:
             if type(node) == Leader:
-                total += node.receivedPackets
+                total += node.totalReceivedPackets + node.receivedPackets
         return total
+
+    def countGatewayPackets(self):
+        return [node.receivedPackets for node in self.nodes if type(node) == Gateway][0]
 
     def countEnergyUsed(self):
         total = 0
@@ -129,7 +150,7 @@ class Node(object):
     def __init__(self, position):
         self.position = position
         self.energyUsed = 0
-        self.signals = []
+        self.signalsBLE = []
         self.signalsLoRa = []
         self.transmitted = False
         self.transmittedLoRa = False
@@ -149,52 +170,79 @@ class Node(object):
     def reset(self):
         self.transmitted = False
         self.transmittedLoRa = False
-        self.signals = []
+        self.signalsBLE = []
         self.signalsLoRa = []
 
     def update(self):
         pass
-        # if self.leader == self:
-        #     print(self.signals)
-        #     data = self.listenBLE()
-        #     if data is not True and data is not False:
-        #
 
     def listenBLE(self):
-        self.energyUsed += 1
-        if len(self.signals) > 1:
+        self.energyUsed += BLE_LISTEN_COST
+        if len(self.signalsBLE) > 1:
             return True
-        elif len(self.signals) == 1:
-            return self.signals[0]
+        elif len(self.signalsBLE) == 1:
+            return self.signalsBLE[0]
         else:
             return False
 
     def transmitBLE(self):
-        self.energyUsed += 1
+        self.energyUsed += FIXED_BLE_PACKET_SIZE * BLE_ENERGY_PER_BYTE
         for node in self.reachablesBLE:
-            node.signals.append(self)
+            node.signalsBLE.append(self)
         self.transmitted = True
 
+    def listenLoRa(self):
+        self.energyUsed += LORA_LISTEN_COST
+        if len(self.signalsLoRa) > 1:
+            return True
+        elif len(self.signalsLoRa) == 1:
+            return self.signalsLoRa[0]
+        else:
+            return False
+
     def transmitLoRa(self):
-        self.energyUsed += 1
+        self.energyUsed += FIXED_LORA_PACKET_SIZE * LORA_ENERGY_PER_BYTE
         for node in self.reachablesLoRA:
             node.signalsLoRa.append(self)
         self.transmittedLoRa = True
 
-# class Gateway(Node):
-#     def __init__(self, position):
-#         self.receivedPackets = 0
-#         self.collisions = 0
-#         self.loraSignals = []
-
-class Leader(Node):
+class Gateway(Node):
     def __init__(self, position):
         super().__init__(position)
         self.receivedPackets = 0
         self.collisions = 0
 
     def __str__(self):
-        return "Leader:" + hex(int(str(id(self)).split(" ")[-1]))
+        return "Gateway:\t" + hex(int(str(id(self)).split(" ")[-1]))
+
+    def __repr__(self):
+        return self.__str__()
+
+    def check(self):
+        super().check()
+
+    def reset(self):
+        super().reset()
+
+    def update(self):
+        super().update()
+
+        signals = self.listenLoRa()
+        if signals:
+            if signals is not True:
+                self.receivedPackets += 1
+            else:
+                self.collisions += 1
+
+class Leader(Node):
+    def __init__(self, position):
+        super().__init__(position)
+        self.totalReceivedPackets = 0
+        self.receivedPackets = 0
+        self.collisions = 0
+
+    def __str__(self):
+        return "Leader:\t" + hex(int(str(id(self)).split(" ")[-1]))
 
     def __repr__(self):
         return self.__str__()
@@ -202,10 +250,13 @@ class Leader(Node):
     def initialize(self, allNodes):
         super().initialize(allNodes)
         self.reachablesLoRA = [node for node in allNodes if
-                type(node) == Leader and loraRXPower(self, node) > -127]
+                type(node) != Follower and loraRXPower(self, node) > -129]
 
     def check(self):
         super().check()
+        if self.signalsLoRa == [self] and self.transmittedLoRa and self.receivedPackets > 5:
+            self.totalReceivedPackets += self.receivedPackets
+            self.receivedPackets = 0
 
     def reset(self):
         super().reset()
@@ -221,20 +272,18 @@ class Leader(Node):
                 self.collisions += 1
 
         if self.receivedPackets > 5:
-            self.transmitLoRa()
-
-
+            if self.listenLoRa() == False:
+                self.transmitLoRa()
 
 
 class Follower(Node):
     def __init__(self, position):
         super().__init__(position)
         self.packets = 0
-        self.leader = None
         self.generatedPackets = 0
 
     def __str__(self):
-        return "Follow:" + hex(int(str(id(self)).split(" ")[-1]))
+        return "Follow:\t" + hex(int(str(id(self)).split(" ")[-1]))
 
     def __repr__(self):
         return self.__str__()
@@ -244,7 +293,7 @@ class Follower(Node):
 
     def check(self):
         super().check()
-        if self.signals == [self] and self.transmitted and self.packets > 0:
+        if self.signalsBLE == [self] and self.transmitted and self.packets > 0:
             # There was no collision so our packet was sent
             self.removePacket()
 
@@ -257,7 +306,7 @@ class Follower(Node):
             else:
                 self.transmitBLE()
 
-        if random.random() < 0.005:
+        if random.random() < PACK_GEN_CHANCE:
             self.addPacket()
 
 
