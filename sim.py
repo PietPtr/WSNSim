@@ -104,11 +104,11 @@ class Simulator(object):
 
         if self.settings["interactive"]:
             input("step")
-            # pprint([vars(node) for node in self.nodes if type(node) == Gateway])
         else:
             if self.settings["visualize_while_running"]:
                 time.sleep(self.settings["time_delay"])
             if self.settings["run_until"](self):
+                self.printState()
                 input("step")
 
         return True
@@ -118,6 +118,10 @@ class Simulator(object):
               "\nPackets received:", self.countPackets(),
               "\nEnergy used     :", self.countEnergyUsed(),
               "\nGateway packs   :", self.countGatewayPackets())
+        try:
+            print("leaders/gateway :", self.countGatewayPackets()*6 / self.countPackets())
+        except Exception as e:
+            pass
 
     def coordToIndex(self, position):
         return (int(position[0] // self.gridsize), int(position[1] // self.gridsize))

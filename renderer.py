@@ -50,7 +50,7 @@ def render(queue):
                 line_color = dot_color
                 radius = 4
 
-            pygame.draw.circle(screen, darkgray, (int(node.position[0]), int(node.position[1])), radius)
+            pygame.draw.circle(screen, lightgray, (int(node.position[0]), int(node.position[1])), radius)
 
             for sig in node.signalsBLE:
                 pygame.draw.line(screen, darkgray, (node.position), (sig.position))
